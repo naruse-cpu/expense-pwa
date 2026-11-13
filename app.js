@@ -34,14 +34,32 @@ function validate(){if(!files.length)throw Error('写真またはPDFを追加し
   if(reportMode()){if(!$('customer').value.trim())throw Error('ユーザー名を入力してください。')}
   else {if(!$('name').value.trim())throw Error('基本設定の名前を入力してください。');if(!/^\d+$/.test($('amount').value.replaceAll(',','')))throw Error('金額は0以上の整数で入力してください。');if($('category').value==='その他'&&!$('other').value.trim())throw Error('その他の勘定科目を入力してください。')}
 }
-async function imagePng(file){const bitmap=await createImageBitmap(file);try{const canvas=document.createElement('canvas');const scale=Math.min(1,2400/Math.max(bitmap.width,bitmap.height));canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));canvas.getContext('2d',{alpha:false}).drawImage(bitmap,0,0,canvas.width,canvas.height);
-  const blob=await new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(Error('画像変換に失敗しました')),'image/png'));return await blob.arrayBuffer();}finally{bitmap.close()}}
+// PDF出力時だけ縮小・JPEG圧縮。元画像やトリミング位置は変更しない。
+async function imageJpeg(file, isReport){
+  const bitmap=await createImageBitmap(file);
+  try{
+    const maxSide=isReport?2200:1600;
+    const quality=isReport?0.80:0.70;
+    const scale=Math.min(1,maxSide/Math.max(bitmap.width,bitmap.height));
+    const canvas=document.createElement('canvas');
+    canvas.width=Math.max(1,Math.round(bitmap.width*scale));
+    canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+    const ctx=canvas.getContext('2d',{alpha:false});
+    if(!ctx)throw Error('画像処理用の画面を作成できませんでした');
+    ctx.fillStyle='#ffffff';ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+    ctx.drawImage(bitmap,0,0,canvas.width,canvas.height);
+    const blob=await new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(Error('JPEG圧縮に失敗しました')),'image/jpeg',quality));
+    if(blob.type!=='image/jpeg')throw Error('JPEG圧縮に対応していません');
+    return await blob.arrayBuffer();
+  }finally{bitmap.close()}
+}
 async function buildPdf(){validate();if(!window.PDFLib)throw Error('PDFライブラリの読み込みに失敗しました。インターネット接続を確認してください。');
   const doc=await PDFLib.PDFDocument.create();for(const entry of files){const file=entry.file;if(file.type==='application/pdf'||/\.pdf$/i.test(file.name)){
       let input;try{input=await PDFLib.PDFDocument.load(await file.arrayBuffer())}catch(_e){throw Error(file.name+' を開けません。暗号化PDFや破損ファイルは非対応です。')}
       const pages=await doc.copyPages(input,input.getPageIndices());for(const p of pages)doc.addPage(p);
-    }else{let png;try{png=await imagePng(entry.processed||file)}catch(_e){throw Error(file.name+' の画像を変換できません。JPEGまたはPNGで試してください。')}
-      const img=await doc.embedPng(png);const page=doc.addPage([595.28,841.89]);const scale=Math.min(555.28/img.width,801.89/img.height);const w=img.width*scale,h=img.height*scale;page.drawImage(img,{x:(595.28-w)/2,y:(841.89-h)/2,width:w,height:h});}}
+    }else{let jpeg;try{jpeg=await imageJpeg(entry.processed||file,reportMode())}catch(_e){throw Error(file.name+' の画像を変換できません。JPEGまたはPNGで試してください。')}
+      const img=await doc.embedJpg(jpeg);const page=doc.addPage([595.28,841.89]);const scale=Math.min(555.28/img.width,801.89/img.height);const w=img.width*scale,h=img.height*scale;page.drawImage(img,{x:(595.28-w)/2,y:(841.89-h)/2,width:w,height:h});}}
   return new File([await doc.save()],$('filename').textContent,{type:'application/pdf'});
 }
 function download(file){const url=URL.createObjectURL(file),a=document.createElement('a');a.href=url;a.download=file.name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000)}
