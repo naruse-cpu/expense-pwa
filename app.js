@@ -29,7 +29,7 @@ function addFiles(list){for(const file of list){if(files.length>=5){alert('最�
   if(!(file.type.startsWith('image/')||file.type==='application/pdf'||/\.pdf$/i.test(file.name))){alert('未対応のファイルです: '+file.name);continue}
   if(files.some(e=>e.file.name===file.name&&e.file.size===file.size&&e.file.lastModified===file.lastModified))continue;
   files.push({file,original:file,processed:null})}drawFiles()}
-function drawFiles(){const list=$('fileList');list.replaceChildren();files.forEach((entry,i)=>{const f=entry.file;const row=document.createElement('div');row.className='file';const title=document.createElement('span');title.textContent=`${i+1}. ${f.name}`+(entry.processed?'（補正済み）':'');row.append(title);if(!(f.type==='application/pdf'||/\.pdf$/i.test(f.name))){const edit=document.createElement('button');edit.className='secondary';edit.textContent='トリミング';edit.onclick=()=>openCrop(i);row.append(edit)}const del=document.createElement('button');del.textContent='削除';del.onclick=()=>{files.splice(i,1);drawFiles()};row.append(del);list.append(row)})}
+function drawFiles(){if(typeof resetPreparedShare==='function')resetPreparedShare();const list=$('fileList');list.replaceChildren();files.forEach((entry,i)=>{const f=entry.file;const row=document.createElement('div');row.className='file';const title=document.createElement('span');title.textContent=`${i+1}. ${f.name}`+(entry.processed?'（補正済み）':'');row.append(title);if(!(f.type==='application/pdf'||/\.pdf$/i.test(f.name))){const edit=document.createElement('button');edit.className='secondary';edit.textContent='トリミング';edit.onclick=()=>openCrop(i);row.append(edit)}const del=document.createElement('button');del.textContent='削除';del.onclick=()=>{files.splice(i,1);drawFiles()};row.append(del);list.append(row)})}
 function validate(){if(!files.length)throw Error('写真またはPDFを追加してください。');if(!$('date').value)throw Error('日付を入力してください。');
   if(reportMode()){if(!$('customer').value.trim())throw Error('ユーザー名を入力してください。')}
   else {if(!$('name').value.trim())throw Error('基本設定の名前を入力してください。');if(!/^\d+$/.test($('amount').value.replaceAll(',','')))throw Error('金額は0以上の整数で入力してください。');if($('category').value==='その他'&&!$('other').value.trim())throw Error('その他の勘定科目を入力してください。')}
@@ -45,6 +45,62 @@ async function buildPdf(){validate();if(!window.PDFLib)throw Error('PDFライブ
   return new File([await doc.save()],$('filename').textContent,{type:'application/pdf'});
 }
 function download(file){const url=URL.createObjectURL(file),a=document.createElement('a');a.href=url;a.download=file.name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000)}
-async function perform(share){$('saveBtn').disabled=true;$('shareBtn').disabled=true;$('status').textContent='PDFを作成しています…';try{const file=await buildPdf();if(share&&navigator.canShare?.({files:[file]})){await navigator.share({files:[file],title:file.name});$('status').textContent='共有画面を開きました。'}else{download(file);$('status').textContent='PDFを作成しました：'+file.name+(share?'（共有非対応のためダウンロードしました）':'')}}catch(e){if(e.name==='AbortError')$('status').textContent='共有をキャンセルしました。';else{$('status').textContent='エラー：'+e.message;alert(e.message)}}finally{$('saveBtn').disabled=false;$('shareBtn').disabled=false}}
-$('saveBtn').onclick=()=>perform(false);$('shareBtn').onclick=()=>perform(true);
+let preparedShareFile=null;
+let preparingShare=false;
+function resetPreparedShare(){
+  preparedShareFile=null;
+  const b=$('shareBtn');
+  b.textContent='ドライブ・メール等に送る';
+  if(!preparingShare)b.disabled=false;
+}
+// 入力や画像が変わった場合、以前に作った共有用PDFは使用しない。
+document.addEventListener('input',e=>{if(e.target.closest('main'))resetPreparedShare()});
+document.addEventListener('change',e=>{if(e.target.closest('main'))resetPreparedShare()});
+async function savePdf(){
+  $('saveBtn').disabled=true;
+  $('status').textContent='PDFを作成しています…';
+  try{
+    const file=await buildPdf();
+    download(file);
+    $('status').textContent='スマホに保存しました：'+file.name;
+  }catch(e){$('status').textContent='エラー：'+e.message;alert(e.message)}
+  finally{$('saveBtn').disabled=false}
+}
+function sharePdf(){
+  if(preparedShareFile){
+    // ユーザー操作の同期処理内でshare()を呼ぶ。await buildPdf()を挟まない。
+    const file=preparedShareFile;
+    if(!navigator.share||!navigator.canShare?.({files:[file]})){
+      $('status').textContent='このブラウザはファイル共有に対応していません。スマホに保存してからドライブやメールで開いてください。';
+      return;
+    }
+    try{
+      const promise=navigator.share({files:[file],title:file.name});
+      $('status').textContent='送信先を選択してください。';
+      Promise.resolve(promise).catch(e=>{
+        if(e.name!=='AbortError'){$('status').textContent='共有エラー：'+e.message;alert('共有できませんでした：'+e.message)}
+        else $('status').textContent='共有をキャンセルしました。もう一度「送る」を押せます。';
+      });
+    }catch(e){$('status').textContent='共有エラー：'+e.message;alert(e.message)}
+    return;
+  }
+  if(preparingShare)return;
+  preparingShare=true;
+  $('shareBtn').disabled=true;
+  $('saveBtn').disabled=true;
+  $('status').textContent='送信用PDFを準備しています…';
+  buildPdf().then(file=>{
+    preparedShareFile=file;
+    $('shareBtn').textContent='送る（準備完了）';
+    $('status').textContent='PDFの準備ができました。「送る（準備完了）」をもう一度押して、Googleドライブやメールを選んでください。';
+  }).catch(e=>{
+    $('status').textContent='エラー：'+e.message;alert(e.message);
+  }).finally(()=>{
+    preparingShare=false;
+    $('saveBtn').disabled=false;
+    $('shareBtn').disabled=false;
+  });
+}
+$('saveBtn').onclick=savePdf;
+$('shareBtn').onclick=sharePdf;
 if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
