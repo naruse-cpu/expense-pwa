@@ -34,12 +34,34 @@ async function autoDetect(){if(!cropState.source)return;cropStatus('用紙の輪
  }finally{source.delete();gray.delete();blur.delete();edges.delete();contours.delete();hierarchy.delete()}}
  catch(e){cropStatus('自動検出を利用できません: '+e.message+'。手動で四隅を調整できますが、補正の実行には画像処理ライブラリが必要です。')}}
 function distance(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
-async function applyCrop(){if(!cropState.source)return;cropStatus('切り抜きと台形補正を実行中…');try{await ensureCv();const pts=ordered(cropState.points);const width=Math.round(Math.max(distance(pts[0],pts[1]),distance(pts[3],pts[2]))),height=Math.round(Math.max(distance(pts[0],pts[3]),distance(pts[1],pts[2])));if(width<80||height<80)throw Error('選択範囲が小さすぎます。');const factor=Math.min(1,2500/Math.max(width,height)),w=Math.max(1,Math.round(width*factor)),h=Math.max(1,Math.round(height*factor));
- const src=cv.imread(cropState.source),dst=new cv.Mat(),srcPoints=cv.matFromArray(4,1,cv.CV_32FC2,pts.flatMap(p=>[p.x,p.y])),dstPoints=cv.matFromArray(4,1,cv.CV_32FC2,[0,0,w-1,0,w-1,h-1,0,h-1]);let matrix;
- try{matrix=cv.getPerspectiveTransform(srcPoints,dstPoints);cv.warpPerspective(src,dst,matrix,new cv.Size(w,h),cv.INTER_LINEAR,cv.BORDER_CONSTANT,new cv.Scalar(255,255,255,255));const mode=document.getElementById('imageMode').value;if(mode!=='color'){const gray=new cv.Mat();try{cv.cvtColor(dst,gray,cv.COLOR_RGBA2GRAY);if(mode==='bw')cv.adaptiveThreshold(gray,gray,255,cv.ADAPTIVE_THRESH_GAUSSIAN_C,cv.THRESH_BINARY,31,12);cv.cvtColor(gray,dst,cv.COLOR_GRAY2RGBA)}finally{gray.delete()}}
- const output=document.createElement('canvas');cv.imshow(output,dst);const blob=await new Promise((res,rej)=>output.toBlob(b=>b?res(b):rej(Error('画像保存に失敗しました')),'image/jpeg',.90));files[cropState.index].processed=blob;drawFiles();closeCrop();$('status').textContent='画像を補正しました。PDFに反映されます。';
- }finally{src.delete();dst.delete();srcPoints.delete();dstPoints.delete();if(matrix)matrix.delete()}}
- catch(e){cropStatus('補正エラー: '+e.message)}}
+// Perspective correction uses native Canvas pixels, independent of OpenCV.js.
+// This also works if OpenCV auto-detection is unavailable on iOS Safari.
+function solveLinear(a,b){const n=b.length;for(let i=0;i<n;i++){let k=i;for(let j=i+1;j<n;j++)if(Math.abs(a[j][i])>Math.abs(a[k][i]))k=j;if(Math.abs(a[k][i])<1e-9)throw Error('四隅の配置を確認してください。');[a[i],a[k]]=[a[k],a[i]];[b[i],b[k]]=[b[k],b[i]];const v=a[i][i];for(let q=i;q<n;q++)a[i][q]/=v;b[i]/=v;for(let j=0;j<n;j++){if(j===i)continue;const m=a[j][i];for(let q=i;q<n;q++)a[j][q]-=m*a[i][q];b[j]-=m*b[i]}}return b}
+function homographyToSource(pts,w,h){const corners=[[0,0],[w-1,0],[w-1,h-1],[0,h-1]],a=[],b=[];for(let i=0;i<4;i++){const [u,v]=corners[i],{x,y}=pts[i];a.push([u,v,1,0,0,0,-x*u,-x*v]);b.push(x);a.push([0,0,0,u,v,1,-y*u,-y*v]);b.push(y)}return solveLinear(a,b)}
+async function applyCrop(){
+ const btn=document.getElementById('applyCropBtn');if(!cropState.source||btn.disabled)return;
+ btn.disabled=true;cropStatus('補正中です。写真のサイズによっては数秒かかります…');
+ try{
+  const pts=ordered(cropState.points),srcCanvas=cropState.source;
+  const width=Math.round(Math.max(distance(pts[0],pts[1]),distance(pts[3],pts[2]))),height=Math.round(Math.max(distance(pts[0],pts[3]),distance(pts[1],pts[2])));
+  if(width<80||height<80)throw Error('選択範囲が小さすぎます。');
+  const factor=Math.min(1,1800/Math.max(width,height)),w=Math.max(1,Math.round(width*factor)),h=Math.max(1,Math.round(height*factor));
+  const hmat=homographyToSource(pts,w,h),[a,b,c,d,e,f,g,k]=hmat;
+  const src=srcCanvas.getContext('2d',{willReadFrequently:true}).getImageData(0,0,srcCanvas.width,srcCanvas.height);
+  const output=document.createElement('canvas');output.width=w;output.height=h;
+  const ctx=output.getContext('2d');const result=ctx.createImageData(w,h);const from=src.data,to=result.data,sw=srcCanvas.width,sh=srcCanvas.height,mode=document.getElementById('imageMode').value;
+  for(let y=0;y<h;y++){for(let x=0;x<w;x++){
+   const denom=g*x+k*y+1,sx=Math.round((a*x+b*y+c)/denom),sy=Math.round((d*x+e*y+f)/denom),j=(y*w+x)*4;
+   let r=255,gr=255,bl=255;if(sx>=0&&sy>=0&&sx<sw&&sy<sh){const i=(sy*sw+sx)*4;r=from[i];gr=from[i+1];bl=from[i+2]}
+   if(mode!=='color'){let v=Math.round(.299*r+.587*gr+.114*bl);if(mode==='bw')v=v>=165?255:0;r=gr=bl=v}
+   to[j]=r;to[j+1]=gr;to[j+2]=bl;to[j+3]=255;
+  }if(y%180===0)await new Promise(resolve=>setTimeout(resolve,0));}
+  ctx.putImageData(result,0,0);
+  const blob=await new Promise((resolve,reject)=>output.toBlob(v=>v?resolve(v):reject(Error('画像保存に失敗しました')),'image/jpeg',.9));
+  const entry=files[cropState.index];if(!entry)throw Error('対象の画像が見つかりません。');entry.processed=blob;
+  drawFiles();closeCrop();$('status').textContent='画像を補正しました。PDFに反映されます。';
+ }catch(err){cropStatus('補正エラー: '+(err?.message||String(err)));console.error(err)}finally{btn.disabled=false}
+}
 function closeCrop(){document.getElementById('cropModal').hidden=true;cropState.index=-1;cropState.source=null;cropState.points=[]}
 document.getElementById('autoCropBtn').onclick=autoDetect;document.getElementById('applyCropBtn').onclick=applyCrop;document.getElementById('cancelCropBtn').onclick=closeCrop;
 document.getElementById('resetCornersBtn').onclick=()=>{if(cropState.source){cropState.points=defaultPoints(cropState.source.width,cropState.source.height);drawCrop();cropStatus('四隅を初期位置に戻しました。')}};
