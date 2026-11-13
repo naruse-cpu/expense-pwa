@@ -17,40 +17,84 @@ function pos(e){const r=cropState.canvas.getBoundingClientRect();return {x:(e.cl
 const editor=document.getElementById('cropCanvas');editor.addEventListener('pointerdown',e=>{if(!cropState.source)return;const p=pos(e);let d=Infinity,k=-1;cropState.points.forEach((q,i)=>{const dd=Math.hypot(p.x-q.x,p.y-q.y);if(dd<d){d=dd;k=i}});if(d<cropState.source.width*.14){cropState.drag=k;editor.setPointerCapture(e.pointerId)}});
 editor.addEventListener('pointermove',e=>{if(cropState.drag<0)return;const p=pos(e);cropState.points[cropState.drag]={x:Math.max(0,Math.min(editor.width-1,p.x)),y:Math.max(0,Math.min(editor.height-1,p.y))};drawCrop()});
 function endDrag(){cropState.drag=-1}editor.addEventListener('pointerup',endDrag);editor.addEventListener('pointercancel',endDrag);
-// Estimate the document quadrilateral by contrasting pixels with the outer image border.
-// This is a lightweight heuristic, not a replacement for full contour detection.
+// Lightweight on-device paper detection. No external OpenCV dependency.
+// Connected-component segmentation plus boundary/corner estimation.
+// A confidence check prevents blindly cropping to a wrong rectangle.
 async function autoDetect(){
  if(!cropState.source)return;
- cropStatus('用紙の輪郭を検出しています…');
+ const btn=document.getElementById('autoCropBtn');btn.disabled=true;
+ cropStatus('用紙の四隅を自動検出しています…');
  try{
-  const src=cropState.source,w=src.width,h=src.height;
-  const max=480,scale=Math.min(1,max/Math.max(w,h));
-  const c=document.createElement('canvas');c.width=Math.max(1,Math.round(w*scale));c.height=Math.max(1,Math.round(h*scale));
-  const x=c.getContext('2d',{willReadFrequently:true});x.drawImage(src,0,0,c.width,c.height);
-  const iw=c.width,ih=c.height,data=x.getImageData(0,0,iw,ih).data;
-  const pix=(xx,yy)=>{let i=(yy*iw+xx)*4;return [data[i],data[i+1],data[i+2]]};
-  // Use multiple samples from all four border strips to estimate background color.
-  const samples=[];const step=Math.max(1,Math.floor(Math.min(iw,ih)/22));
-  for(let xx=0;xx<iw;xx+=step){samples.push(pix(xx,0),pix(xx,ih-1))}
-  for(let yy=0;yy<ih;yy+=step){samples.push(pix(0,yy),pix(iw-1,yy))}
-  const median=arr=>{arr.sort((a,b)=>a-b);return arr[Math.floor(arr.length/2)]};
-  const bg=[0,1,2].map(ch=>median(samples.map(p=>p[ch])));
-  const threshold=55;const countRows=new Uint32Array(ih),countCols=new Uint32Array(iw);
-  for(let yy=2;yy<ih-2;yy++)for(let xx=2;xx<iw-2;xx++){
-   const i=(yy*iw+xx)*4;const d=Math.abs(data[i]-bg[0])+Math.abs(data[i+1]-bg[1])+Math.abs(data[i+2]-bg[2]);
-   if(d>threshold){countRows[yy]++;countCols[xx]++}
+  const source=cropState.source,W=source.width,H=source.height;
+  const sc=Math.min(1,420/Math.max(W,H));
+  const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(W*sc));canvas.height=Math.max(1,Math.round(H*sc));
+  const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(source,0,0,canvas.width,canvas.height);
+  const w=canvas.width,h=canvas.height,n=w*h,d=ctx.getImageData(0,0,w,h).data;
+  const gray=new Uint8Array(n),rgb=new Uint8Array(n*3);
+  for(let i=0;i<n;i++){let j=i*4;gray[i]=Math.round(d[j]*.299+d[j+1]*.587+d[j+2]*.114);rgb[i*3]=d[j];rgb[i*3+1]=d[j+1];rgb[i*3+2]=d[j+2]}
+  // Robust border color estimate, useful for paper on a desk.
+  const sample=[[],[],[]],stride=Math.max(2,Math.floor(Math.min(w,h)/35));
+  function take(x,y){const j=(y*w+x)*3;for(let k=0;k<3;k++)sample[k].push(rgb[j+k])}
+  for(let x=0;x<w;x+=stride){take(x,0);take(x,h-1)}
+  for(let y=0;y<h;y+=stride){take(0,y);take(w-1,y)}
+  const median=v=>{v.sort((a,b)=>a-b);return v[Math.floor(v.length/2)]};
+  const bg=sample.map(median),mask=new Uint8Array(n);
+  // Bright paper against darker background OR chromatic difference against colored surface.
+  let contrastCount=0;
+  for(let y=2;y<h-2;y++)for(let x=2;x<w-2;x++){
+   const i=y*w+x,j=i*3,delta=Math.abs(rgb[j]-bg[0])+Math.abs(rgb[j+1]-bg[1])+Math.abs(rgb[j+2]-bg[2]);
+   const bright=gray[i]>150&&gray[i]>(bg[0]*.299+bg[1]*.587+bg[2]*.114)+24;
+   if(delta>70||bright){mask[i]=1;contrastCount++}
   }
-  const rowMin=Math.max(4,Math.floor(iw*.12)),colMin=Math.max(4,Math.floor(ih*.12));
-  let top=0,bottom=ih-1,left=0,right=iw-1;
-  while(top<ih&&countRows[top]<rowMin)top++;
-  while(bottom>top&&countRows[bottom]<rowMin)bottom--;
-  while(left<iw&&countCols[left]<colMin)left++;
-  while(right>left&&countCols[right]<colMin)right--;
-  if(right-left<iw*.25||bottom-top<ih*.25)throw Error('用紙の範囲を特定できませんでした');
-  const pad=3;left=Math.max(0,left-pad);right=Math.min(iw-1,right+pad);top=Math.max(0,top-pad);bottom=Math.min(ih-1,bottom+pad);
-  cropState.points=[{x:left/scale,y:top/scale},{x:right/scale,y:top/scale},{x:right/scale,y:bottom/scale},{x:left/scale,y:bottom/scale}];
-  drawCrop();cropStatus('自動検出の候補を表示しました。四隅を確認し、青い点を指で調整してから「補正を確定」を押してください。');
- }catch(e){cropStatus('自動検出できませんでした。青い点を用紙の四隅に合わせて「補正を確定」を押してください。')}
+  if(contrastCount<n*.045)throw Error('背景との色の差が小さすぎます');
+  // Majority filter closes small holes caused by print on the page.
+  for(let pass=0;pass<2;pass++){
+   const copy=mask.slice();
+   for(let y=2;y<h-2;y++)for(let x=2;x<w-2;x++){
+    const i=y*w+x;let sum=0;
+    for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)sum+=copy[i+dy*w+dx];
+    if(sum>=5)mask[i]=1;else if(sum<=2)mask[i]=0;
+   }
+  }
+  // Find largest foreground region; prefer one containing image center.
+  const seen=new Uint8Array(n),queue=new Int32Array(n);let best=null;
+  for(let i=0;i<n;i++){
+   if(!mask[i]||seen[i])continue;
+   let head=0,tail=1;queue[0]=i;seen[i]=1;let minX=w,minY=h,maxX=0,maxY=0;
+   const pixels=[];
+   while(head<tail){const at=queue[head++],x=at%w,y=(at/w)|0;pixels.push(at);
+    if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;
+    const neighbors=[at-1,at+1,at-w,at+w];
+    for(const v of neighbors){if(v<0||v>=n||Math.abs(v%w-x)+Math.abs(((v/w)|0)-y)!==1||!mask[v]||seen[v])continue;seen[v]=1;queue[tail++]=v}
+   }
+   const area=tail,box=(maxX-minX+1)*(maxY-minY+1);
+   if(area<n*.06||box<n*.12)continue;
+   const center=(minX<w*.5&&maxX>w*.5&&minY<h*.5&&maxY>h*.5);
+   const score=area*(center?1.35:1);
+   if(!best||score>best.score)best={score,area,pixels,minX,minY,maxX,maxY};
+  }
+  if(!best)throw Error('用紙の輪郭を特定できませんでした');
+  if(best.maxX-best.minX<w*.25||best.maxY-best.minY<h*.25)throw Error('検出領域が小さすぎます');
+  // Estimate the four actual corners rather than forcing an axis-aligned rectangle.
+  // Ignore the outermost 0.5% of points to reduce isolated noise.
+  const pts=best.pixels.filter(i=>{const x=i%w,y=(i/w)|0;return x>0&&x<w-1&&y>0&&y<h-1}).map(i=>({x:i%w,y:(i/w)|0}));
+  if(pts.length<100)throw Error('輪郭点が不足しています');
+  const corner=(fn,low)=>{
+   const ranked=pts.map(p=>({p,v:fn(p)})).sort((a,b)=>low?a.v-b.v:b.v-a.v);
+   const count=Math.max(1,Math.floor(ranked.length*.002));
+   let x=0,y=0;for(let j=0;j<count;j++){x+=ranked[j].p.x;y+=ranked[j].p.y}
+   return {x:x/count,y:y/count};
+  };
+  const candidates=[corner(p=>p.x+p.y,true),corner(p=>p.x-p.y,false),corner(p=>p.x+p.y,false),corner(p=>p.x-p.y,true)];
+  const area=Math.abs(candidates.reduce((sum,p,i)=>{const q=candidates[(i+1)%4];return sum+p.x*q.y-q.x*p.y},0))/2;
+  const bbox=(best.maxX-best.minX)*(best.maxY-best.minY);
+  if(area<bbox*.40)throw Error('四隅の推定が不安定です');
+  // Add small inward-safe margin (roughly 1% of page), keeping the whole paper.
+  const cx=candidates.reduce((v,p)=>v+p.x,0)/4,cy=candidates.reduce((v,p)=>v+p.y,0)/4;
+  cropState.points=candidates.map(p=>({x:Math.max(0,Math.min(W-1,(p.x+(p.x-cx)*.015)/sc)),y:Math.max(0,Math.min(H-1,(p.y+(p.y-cy)*.015)/sc))}));
+  drawCrop();cropStatus('用紙の四隅を推定しました。青い4点を確認し、必要なら指で修正して「補正を確定」を押してください。');
+ }catch(err){cropStatus('自動検出できませんでした（'+err.message+'）。青い4点を手動で合わせてください。');}
+ finally{btn.disabled=false}
 }
 function distance(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
 // Perspective correction uses native Canvas pixels, independent of OpenCV.js.
