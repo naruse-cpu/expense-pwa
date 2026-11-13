@@ -27,9 +27,9 @@ $('drop').ondragleave=()=> $('drop').classList.remove('drag');
 $('drop').ondrop=e=>{e.preventDefault();$('drop').classList.remove('drag');addFiles(e.dataTransfer.files)};
 function addFiles(list){for(const file of list){if(files.length>=5){alert('最大5ファイルまでです。');break}
   if(!(file.type.startsWith('image/')||file.type==='application/pdf'||/\.pdf$/i.test(file.name))){alert('未対応のファイルです: '+file.name);continue}
-  if(files.some(f=>f.name===file.name&&f.size===file.size&&f.lastModified===file.lastModified))continue;
-  files.push(file)}drawFiles()}
-function drawFiles(){const list=$('fileList');list.replaceChildren();files.forEach((f,i)=>{const row=document.createElement('div');row.className='file';const title=document.createElement('span');title.textContent=`${i+1}. ${f.name}`;const del=document.createElement('button');del.textContent='削除';del.onclick=()=>{files.splice(i,1);drawFiles()};row.append(title,del);list.append(row)})}
+  if(files.some(e=>e.file.name===file.name&&e.file.size===file.size&&e.file.lastModified===file.lastModified))continue;
+  files.push({file,original:file,processed:null})}drawFiles()}
+function drawFiles(){const list=$('fileList');list.replaceChildren();files.forEach((entry,i)=>{const f=entry.file;const row=document.createElement('div');row.className='file';const title=document.createElement('span');title.textContent=`${i+1}. ${f.name}`+(entry.processed?'（補正済み）':'');row.append(title);if(!(f.type==='application/pdf'||/\.pdf$/i.test(f.name))){const edit=document.createElement('button');edit.className='secondary';edit.textContent='トリミング';edit.onclick=()=>openCrop(i);row.append(edit)}const del=document.createElement('button');del.textContent='削除';del.onclick=()=>{files.splice(i,1);drawFiles()};row.append(del);list.append(row)})}
 function validate(){if(!files.length)throw Error('写真またはPDFを追加してください。');if(!$('date').value)throw Error('日付を入力してください。');
   if(reportMode()){if(!$('customer').value.trim())throw Error('ユーザー名を入力してください。')}
   else {if(!$('name').value.trim())throw Error('基本設定の名前を入力してください。');if(!/^\d+$/.test($('amount').value.replaceAll(',','')))throw Error('金額は0以上の整数で入力してください。');if($('category').value==='その他'&&!$('other').value.trim())throw Error('その他の勘定科目を入力してください。')}
@@ -37,10 +37,10 @@ function validate(){if(!files.length)throw Error('写真またはPDFを追加し
 async function imagePng(file){const bitmap=await createImageBitmap(file);try{const canvas=document.createElement('canvas');const scale=Math.min(1,2400/Math.max(bitmap.width,bitmap.height));canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));canvas.getContext('2d',{alpha:false}).drawImage(bitmap,0,0,canvas.width,canvas.height);
   const blob=await new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(Error('画像変換に失敗しました')),'image/png'));return await blob.arrayBuffer();}finally{bitmap.close()}}
 async function buildPdf(){validate();if(!window.PDFLib)throw Error('PDFライブラリの読み込みに失敗しました。インターネット接続を確認してください。');
-  const doc=await PDFLib.PDFDocument.create();for(const file of files){if(file.type==='application/pdf'||/\.pdf$/i.test(file.name)){
+  const doc=await PDFLib.PDFDocument.create();for(const entry of files){const file=entry.file;if(file.type==='application/pdf'||/\.pdf$/i.test(file.name)){
       let input;try{input=await PDFLib.PDFDocument.load(await file.arrayBuffer())}catch(_e){throw Error(file.name+' を開けません。暗号化PDFや破損ファイルは非対応です。')}
       const pages=await doc.copyPages(input,input.getPageIndices());for(const p of pages)doc.addPage(p);
-    }else{let png;try{png=await imagePng(file)}catch(_e){throw Error(file.name+' の画像を変換できません。JPEGまたはPNGで試してください。')}
+    }else{let png;try{png=await imagePng(entry.processed||file)}catch(_e){throw Error(file.name+' の画像を変換できません。JPEGまたはPNGで試してください。')}
       const img=await doc.embedPng(png);const page=doc.addPage([595.28,841.89]);const scale=Math.min(555.28/img.width,801.89/img.height);const w=img.width*scale,h=img.height*scale;page.drawImage(img,{x:(595.28-w)/2,y:(841.89-h)/2,width:w,height:h});}}
   return new File([await doc.save()],$('filename').textContent,{type:'application/pdf'});
 }
