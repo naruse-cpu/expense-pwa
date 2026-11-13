@@ -6,10 +6,11 @@ function cropStatus(s){document.getElementById('cropStatus').textContent=s}
 function ordered(pts){const a=pts.map(p=>({x:p.x,y:p.y}));const sums=a.map(p=>p.x+p.y),diffs=a.map(p=>p.y-p.x);
  const tl=a[sums.indexOf(Math.min(...sums))],br=a[sums.indexOf(Math.max(...sums))],tr=a[diffs.indexOf(Math.min(...diffs))],bl=a[diffs.indexOf(Math.max(...diffs))];
  if(new Set([tl,tr,br,bl]).size!==4)throw Error('四隅の位置が重なっています。');return [tl,tr,br,bl];}
+function saveCropPoints(){const entry=files[cropState.index],src=cropState.source;if(entry&&src&&cropState.points.length===4){entry.cropPoints=cropState.points.map(p=>({x:p.x/src.width,y:p.y/src.height}));}}
 function defaultPoints(w,h){const dx=w*.07,dy=h*.07;return [{x:dx,y:dy},{x:w-dx,y:dy},{x:w-dx,y:h-dy},{x:dx,y:h-dy}]}
 async function openCrop(i){const entry=files[i];if(!entry||entry.file.type==='application/pdf'||/\.pdf$/i.test(entry.file.name))return;
  cropState.index=i;document.getElementById('cropModal').hidden=false;cropStatus('画像を読み込んでいます…');
- try{const bitmap=await createImageBitmap(entry.original);const max=1600,scale=Math.min(1,max/Math.max(bitmap.width,bitmap.height));const c=document.createElement('canvas');c.width=Math.max(1,Math.round(bitmap.width*scale));c.height=Math.max(1,Math.round(bitmap.height*scale));c.getContext('2d',{willReadFrequently:true}).drawImage(bitmap,0,0,c.width,c.height);bitmap.close();cropState.source=c;cropState.points=defaultPoints(c.width,c.height);cropState.canvas=document.getElementById('cropCanvas');drawCrop();cropStatus('枠は最初から少し内側に表示しています。青い4点を動かして調整するか、「画面全体に広げる」を押してください。');}catch(e){cropStatus('画像を開けません: '+e.message)}
+ try{const bitmap=await createImageBitmap(entry.original);const max=1600,scale=Math.min(1,max/Math.max(bitmap.width,bitmap.height));const c=document.createElement('canvas');c.width=Math.max(1,Math.round(bitmap.width*scale));c.height=Math.max(1,Math.round(bitmap.height*scale));c.getContext('2d',{willReadFrequently:true}).drawImage(bitmap,0,0,c.width,c.height);bitmap.close();cropState.source=c;cropState.points=(Array.isArray(entry.cropPoints)&&entry.cropPoints.length===4)?entry.cropPoints.map(p=>({x:Math.max(0,Math.min(c.width-1,p.x*c.width)),y:Math.max(0,Math.min(c.height-1,p.y*c.height))})):defaultPoints(c.width,c.height);cropState.canvas=document.getElementById('cropCanvas');drawCrop();cropStatus(entry.cropPoints?'前回設定した四隅の位置を復元しました。必要なら調整してください。':'枠は最初から少し内側に表示しています。青い4点を動かして調整するか、「画面全体に広げる」を押してください。');}catch(e){cropStatus('画像を開けません: '+e.message)}
 }
 function drawCrop(){const src=cropState.source;if(!src)return;const c=cropState.canvas;c.width=src.width;c.height=src.height;const x=c.getContext('2d');x.drawImage(src,0,0);x.save();x.lineWidth=Math.max(3,src.width/230);x.strokeStyle='#17b3ff';x.fillStyle='rgba(20,150,255,.13)';x.beginPath();cropState.points.forEach((p,i)=>i?x.lineTo(p.x,p.y):x.moveTo(p.x,p.y));x.closePath();x.fill();x.stroke();cropState.points.forEach((p,i)=>{x.beginPath();x.arc(p.x,p.y,Math.max(12,src.width/65),0,Math.PI*2);x.fillStyle='#ffffff';x.fill();x.strokeStyle='#0077c8';x.stroke();x.fillStyle='#174c89';x.font=`bold ${Math.max(17,src.width/40)}px sans-serif`;x.fillText(String(i+1),p.x+15,p.y-15)});x.restore()}
 function pos(e){const r=cropState.canvas.getBoundingClientRect();return {x:(e.clientX-r.left)*cropState.canvas.width/r.width,y:(e.clientY-r.top)*cropState.canvas.height/r.height}}
@@ -48,11 +49,11 @@ async function applyCrop(){
   }if(y%180===0)await new Promise(resolve=>setTimeout(resolve,0));}
   ctx.putImageData(result,0,0);
   const blob=await new Promise((resolve,reject)=>output.toBlob(v=>v?resolve(v):reject(Error('画像保存に失敗しました')),'image/jpeg',.9));
-  const entry=files[cropState.index];if(!entry)throw Error('対象の画像が見つかりません。');entry.processed=blob;
+  const entry=files[cropState.index];if(!entry)throw Error('対象の画像が見つかりません。');entry.processed=blob;saveCropPoints();
   drawFiles();closeCrop();$('status').textContent='画像を補正しました。PDFに反映されます。';
  }catch(err){cropStatus('補正エラー: '+(err?.message||String(err)));console.error(err)}finally{btn.disabled=false}
 }
-function closeCrop(){document.getElementById('cropModal').hidden=true;cropState.index=-1;cropState.source=null;cropState.points=[]}
+function closeCrop(){saveCropPoints();document.getElementById('cropModal').hidden=true;cropState.index=-1;cropState.source=null;cropState.points=[]}
 document.getElementById('autoCropBtn').onclick=expandToFullImage;document.getElementById('applyCropBtn').onclick=applyCrop;document.getElementById('cancelCropBtn').onclick=closeCrop;
 document.getElementById('resetCornersBtn').onclick=()=>{if(cropState.source){cropState.points=defaultPoints(cropState.source.width,cropState.source.height);drawCrop();cropStatus('四隅を初期位置に戻しました。')}};
-document.getElementById('restoreOriginalBtn').onclick=()=>{if(cropState.index>=0){files[cropState.index].processed=null;drawFiles();closeCrop();$('status').textContent='元画像に戻しました。'}};
+document.getElementById('restoreOriginalBtn').onclick=()=>{if(cropState.index>=0){files[cropState.index].processed=null;files[cropState.index].cropPoints=null;cropState.points=defaultPoints(cropState.source.width,cropState.source.height);drawFiles();closeCrop();$('status').textContent='元画像に戻しました。'}};
