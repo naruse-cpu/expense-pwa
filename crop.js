@@ -2,17 +2,7 @@
 // Browser-side document detection and perspective correction. No image upload.
 const cropState={index:-1,canvas:null,ctx:null,source:null,points:[],drag:-1,ready:false,cvPromise:null};
 function cropStatus(s){document.getElementById('cropStatus').textContent=s}
-function ensureCv(){
- if(window.cv&&typeof cv.Mat==='function')return Promise.resolve(cv);
- if(cropState.cvPromise)return cropState.cvPromise;
- cropState.cvPromise=new Promise((resolve,reject)=>{
-   const script=document.createElement('script');script.src='https://docs.opencv.org/4.x/opencv.js';script.async=true;
-   const timeout=setTimeout(()=>reject(Error('画像処理ライブラリの読み込みがタイムアウトしました。通信環境を確認してください。')),35000);
-   script.onerror=()=>{clearTimeout(timeout);reject(Error('画像処理ライブラリを読み込めませんでした。'))};
-   script.onload=()=>{let n=0;const check=()=>{if(window.cv&&typeof cv.Mat==='function'){clearTimeout(timeout);resolve(cv)}else if(n++<150)setTimeout(check,100);else{clearTimeout(timeout);reject(Error('画像処理の初期化に失敗しました。'))}};check()};
-   document.head.appendChild(script);
- });return cropState.cvPromise;
-}
+// No external image processing dependency: all operations run in Safari Canvas.
 function ordered(pts){const a=pts.map(p=>({x:p.x,y:p.y}));const sums=a.map(p=>p.x+p.y),diffs=a.map(p=>p.y-p.x);
  const tl=a[sums.indexOf(Math.min(...sums))],br=a[sums.indexOf(Math.max(...sums))],tr=a[diffs.indexOf(Math.min(...diffs))],bl=a[diffs.indexOf(Math.max(...diffs))];
  if(new Set([tl,tr,br,bl]).size!==4)throw Error('四隅の位置が重なっています。');return [tl,tr,br,bl];}
@@ -27,12 +17,41 @@ function pos(e){const r=cropState.canvas.getBoundingClientRect();return {x:(e.cl
 const editor=document.getElementById('cropCanvas');editor.addEventListener('pointerdown',e=>{if(!cropState.source)return;const p=pos(e);let d=Infinity,k=-1;cropState.points.forEach((q,i)=>{const dd=Math.hypot(p.x-q.x,p.y-q.y);if(dd<d){d=dd;k=i}});if(d<cropState.source.width*.14){cropState.drag=k;editor.setPointerCapture(e.pointerId)}});
 editor.addEventListener('pointermove',e=>{if(cropState.drag<0)return;const p=pos(e);cropState.points[cropState.drag]={x:Math.max(0,Math.min(editor.width-1,p.x)),y:Math.max(0,Math.min(editor.height-1,p.y))};drawCrop()});
 function endDrag(){cropState.drag=-1}editor.addEventListener('pointerup',endDrag);editor.addEventListener('pointercancel',endDrag);
-async function autoDetect(){if(!cropState.source)return;cropStatus('用紙の輪郭を検出しています…');try{await ensureCv();const source=cv.imread(cropState.source),gray=new cv.Mat(),blur=new cv.Mat(),edges=new cv.Mat(),contours=new cv.MatVector(),hierarchy=new cv.Mat();
- try{cv.cvtColor(source,gray,cv.COLOR_RGBA2GRAY);cv.GaussianBlur(gray,blur,new cv.Size(5,5),0);cv.Canny(blur,edges,45,130);cv.findContours(edges,contours,hierarchy,cv.RETR_LIST,cv.CHAIN_APPROX_SIMPLE);
- let best=null,area=0;for(let i=0;i<contours.size();i++){const contour=contours.get(i),approx=new cv.Mat();try{const ar=cv.contourArea(contour);if(ar<source.cols*source.rows*.08||ar<=area)continue;cv.approxPolyDP(contour,approx,.025*cv.arcLength(contour,true),true);if(approx.rows===4&&cv.isContourConvex(approx)){const pts=[];for(let j=0;j<4;j++)pts.push({x:approx.intPtr(j,0)[0],y:approx.intPtr(j,0)[1]});best=ordered(pts);area=ar}}finally{contour.delete();approx.delete()}}
- if(best){cropState.points=best;drawCrop();cropStatus('自動検出できました。四隅の位置を確認して、必要なら青い点を動かしてください。')}else cropStatus('用紙を自動検出できませんでした。青い点を四隅に合わせてください。');
- }finally{source.delete();gray.delete();blur.delete();edges.delete();contours.delete();hierarchy.delete()}}
- catch(e){cropStatus('自動検出を利用できません: '+e.message+'。手動で四隅を調整できますが、補正の実行には画像処理ライブラリが必要です。')}}
+// Estimate the document quadrilateral by contrasting pixels with the outer image border.
+// This is a lightweight heuristic, not a replacement for full contour detection.
+async function autoDetect(){
+ if(!cropState.source)return;
+ cropStatus('用紙の輪郭を検出しています…');
+ try{
+  const src=cropState.source,w=src.width,h=src.height;
+  const max=480,scale=Math.min(1,max/Math.max(w,h));
+  const c=document.createElement('canvas');c.width=Math.max(1,Math.round(w*scale));c.height=Math.max(1,Math.round(h*scale));
+  const x=c.getContext('2d',{willReadFrequently:true});x.drawImage(src,0,0,c.width,c.height);
+  const iw=c.width,ih=c.height,data=x.getImageData(0,0,iw,ih).data;
+  const pix=(xx,yy)=>{let i=(yy*iw+xx)*4;return [data[i],data[i+1],data[i+2]]};
+  // Use multiple samples from all four border strips to estimate background color.
+  const samples=[];const step=Math.max(1,Math.floor(Math.min(iw,ih)/22));
+  for(let xx=0;xx<iw;xx+=step){samples.push(pix(xx,0),pix(xx,ih-1))}
+  for(let yy=0;yy<ih;yy+=step){samples.push(pix(0,yy),pix(iw-1,yy))}
+  const median=arr=>{arr.sort((a,b)=>a-b);return arr[Math.floor(arr.length/2)]};
+  const bg=[0,1,2].map(ch=>median(samples.map(p=>p[ch])));
+  const threshold=55;const countRows=new Uint32Array(ih),countCols=new Uint32Array(iw);
+  for(let yy=2;yy<ih-2;yy++)for(let xx=2;xx<iw-2;xx++){
+   const i=(yy*iw+xx)*4;const d=Math.abs(data[i]-bg[0])+Math.abs(data[i+1]-bg[1])+Math.abs(data[i+2]-bg[2]);
+   if(d>threshold){countRows[yy]++;countCols[xx]++}
+  }
+  const rowMin=Math.max(4,Math.floor(iw*.12)),colMin=Math.max(4,Math.floor(ih*.12));
+  let top=0,bottom=ih-1,left=0,right=iw-1;
+  while(top<ih&&countRows[top]<rowMin)top++;
+  while(bottom>top&&countRows[bottom]<rowMin)bottom--;
+  while(left<iw&&countCols[left]<colMin)left++;
+  while(right>left&&countCols[right]<colMin)right--;
+  if(right-left<iw*.25||bottom-top<ih*.25)throw Error('用紙の範囲を特定できませんでした');
+  const pad=3;left=Math.max(0,left-pad);right=Math.min(iw-1,right+pad);top=Math.max(0,top-pad);bottom=Math.min(ih-1,bottom+pad);
+  cropState.points=[{x:left/scale,y:top/scale},{x:right/scale,y:top/scale},{x:right/scale,y:bottom/scale},{x:left/scale,y:bottom/scale}];
+  drawCrop();cropStatus('自動検出の候補を表示しました。四隅を確認し、青い点を指で調整してから「補正を確定」を押してください。');
+ }catch(e){cropStatus('自動検出できませんでした。青い点を用紙の四隅に合わせて「補正を確定」を押してください。')}
+}
 function distance(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
 // Perspective correction uses native Canvas pixels, independent of OpenCV.js.
 // This also works if OpenCV auto-detection is unavailable on iOS Safari.
